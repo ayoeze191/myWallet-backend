@@ -1,0 +1,23 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: ourwallet-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ourwallet
+      POSTGRES_USER: ourwallet_user
+      POSTGRES_PASSWORD: ourwallet_password
+    ports:
+      - '5432:5432'
+    volumes:
+      - outwallet_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ourwallet_user -d ourwallet']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  outwallet_postgres_data:

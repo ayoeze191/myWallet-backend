@@ -1,0 +1,22 @@
+{
+  "name": "wallet-system",
+  "version": "1.0.0",
+  "description": "Small wallet backend: fund via Paystack, transfer between wallets, double-entry ledger",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "migrate": "node src/db/migrate.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.4",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.3",
+    "lucide-react": "^1.27.0",
+    "pg": "^8.12.0"
+  }
+}
