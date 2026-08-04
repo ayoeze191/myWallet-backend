@@ -5,6 +5,7 @@ const authRoutes = require("./src/routes/auth");
 const walletRoutes = require("./src/routes/wallets");
 const transferRoutes = require("./src/routes/transfers");
 const webhookRoutes = require("./src/routes/webhooks");
+const fundCallbackRoutes = require("./src/routes/fundCallback");
 
 if (!process.env.JWT_SECRET) {
   console.error("JWT_SECRET is not set in .env — refusing to start.");
@@ -26,6 +27,8 @@ app.use(webhookRoutes);
 
 // Everything else can safely use normal JSON body parsing.
 app.use(express.json());
+// This route must remain public: Paystack redirects the user's browser here.
+app.use(fundCallbackRoutes);
 app.use(authRoutes);
 app.use(walletRoutes);
 app.use(transferRoutes);
