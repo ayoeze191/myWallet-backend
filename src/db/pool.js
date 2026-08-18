@@ -1,5 +1,12 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
 require('dotenv').config();
+
+// Hand DATE columns back as plain 'YYYY-MM-DD' strings.
+// By default node-postgres builds a JS Date at LOCAL midnight, which then
+// serialises to the previous day in UTC anywhere east of Greenwich — an Ajo
+// due date of the 8th would reach the browser as the 7th. Ajo dates are
+// calendar days, not instants, so a string is the honest representation.
+types.setTypeParser(types.builtins.DATE, (value) => value);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
