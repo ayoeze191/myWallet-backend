@@ -1,108 +1,246 @@
-# Ajo — a rotating savings app
+# Ajo — backend
 
-An **ajo** (also called *esusu* or a ROSCA) is a savings club: a group agrees
-on an amount and a rhythm, everybody pays in each round, and each round one
-member takes the whole pot. Over a full cycle everyone puts in the same
-amount and everyone collects once — the value is getting a lump sum earlier
-than you could have saved it alone.
+The API and rotation engine behind **Ajo**, a rotating-savings app built on a
+double-entry wallet ledger.
 
-This app is that, built on a wallet. Users fund a wallet (via Paystack),
-start a contribution, share an invite link, and members join before the
-start date. From then on the rotation runs itself: contributions are pulled
-from members' wallets automatically and the pot is paid out in turn.
+An **ajo** (also *esusu*, or a ROSCA) is a savings club: a group agrees on an
+amount and a rhythm, everybody pays in each round, and each round one member
+takes the whole pot. Over a full cycle everyone puts in the same amount and
+everyone collects exactly once — the value is getting a lump sum earlier than
+you could have saved it alone.
 
-## Setup
+This service does three things:
 
-### Backend
+1. **Wallets** — one per user, funded with Paystack, spendable by transfer.
+2. **A ledger** — append-only double-entry rows that are the source of truth
+   for every naira in the system.
+3. **The Ajo engine** — a background sweep that starts groups when their date
+   arrives, pulls each round's contributions out of members' wallets, and pays
+   the pot out in turn.
+
+The React client lives in [`frontend/`](frontend/) and is a separate
+repository with its own README.
+
+---
+
+## Stack
+
+| Piece | Choice |
+|---|---|
+| Runtime | Node.js 20+ (developed on 22) |
+| Framework | Express 4 |
+| Database | PostgreSQL 16 (`pg`, raw SQL — no ORM) |
+| Auth | JWT (`jsonwebtoken`) + `bcryptjs` |
+| Payments | Paystack (`axios` for init, HMAC-SHA512 for webhooks) |
+| Scheduling | in-process `setInterval` sweep |
+
+Modules are CommonJS (`"type": "commonjs"`).
+
+---
+
+## Quick start
+
 ```bash
+# 1. Postgres (or point DATABASE_URL at your own instance)
+docker compose up -d
+
+# 2. Dependencies
 npm install
-cp .env.example .env   # fill in DATABASE_URL and PAYSTACK_SECRET_KEY
-npm run migrate         # creates tables
-npm run dev             # starts server on PORT (default 4000)
+
+# 3. Environment
+cp .env.example .env      # then fill in JWT_SECRET and PAYSTACK_SECRET_KEY
+
+# 4. Tables
+npm run migrate
+
+# 5. Run
+npm run dev               # node --watch, restarts on save
 ```
 
-### Frontend
-```bash
-cd frontend
-npm install
-cp .env.example .env   # set VITE_API_BASE_URL if backend isn't on localhost:4000
-npm run dev             # starts on http://localhost:5173
+The server refuses to start without `JWT_SECRET` — that is deliberate, a
+wallet API with a default signing secret is worse than one that won't boot.
+
+`npm run migrate` is safe to re-run against an existing database. `schema.sql`
+is replayed whole and every statement is written idempotently (`CREATE TABLE
+IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, `DROP CONSTRAINT IF EXISTS` before
+each `ADD CONSTRAINT`), so existing users, balances and ledger history survive.
+
+| Script | What it does |
+|---|---|
+| `npm start` | Run the server |
+| `npm run dev` | Run with `--watch` |
+| `npm run migrate` | Apply `src/db/schema.sql` |
+
+---
+
+## Environment
+
+| Variable | Required | Purpose |
+|---|:---:|---|
+| `PORT` | no | HTTP port, default `4000` |
+| `DATABASE_URL` | **yes** | Postgres connection string |
+| `JWT_SECRET` | **yes** | Signs auth tokens; the process exits if unset |
+| `PAYSTACK_SECRET_KEY` | **yes** | Used both to call Paystack and to verify its webhook signatures |
+| `PAYSTACK_BASE_URL` | no | Defaults to `https://api.paystack.co` |
+| `APP_BASE_URL` | no | Origin used to build the Paystack `callback_url` and invite links |
+| `AJO_TICK_MS` | no | Sweep interval, default `60000` |
+
+Two caveats worth knowing before you deploy:
+
+- **`APP_BASE_URL` is doing two jobs.** The Paystack callback is a *backend*
+  route (`/wallets/fund/callback`), while invite links point at a *frontend*
+  route (`/join/:code`). With one variable you can only get one of them right;
+  splitting it into `APP_BASE_URL` and a separate `FRONTEND_BASE_URL` is the
+  fix and is not done yet.
+- **CORS origin is hardcoded** to `http://localhost:5173` in
+  [server.js](server.js). Change it (or make it an env var) before hosting the
+  frontend anywhere else.
+
+---
+
+## Layout
+
+```
+server.js                  route mounting order, error handler, scheduler boot
+src/
+  db/
+    pool.js                pg pool + withTransaction() helper, DATE type parser
+    schema.sql             the whole schema, re-runnable
+    migrate.js             replays schema.sql
+  middleware/
+    requireAuth.js         Bearer token -> req.userId
+  routes/
+    auth.js                register (user + wallet atomically), login
+    wallets.js             my wallet, my ledger, recipient lookup, fund
+    transfers.js           wallet-to-wallet by recipient email
+    webhooks.js            Paystack charge.success — the only place money is credited
+    fundCallback.js        HTML receipt page Paystack redirects the user back to
+    contributions.js       Ajo routes, public invite preview split out
+  services/
+    auth.js                bcrypt + JWT
+    ledger.js              creditWallet / debitWallet / transferBetweenWallets
+    idempotency.js         reserve a transaction by key, mark its status
+    paystack.js            initialize a charge, verify a webhook signature
+    ajo.js                 the rotation engine
+    scheduler.js           60s sweep over live contributions
 ```
 
-You'll need a local Postgres running and a free Paystack test account
-(dashboard.paystack.com) for the secret key.
+**Mounting order in `server.js` is load-bearing.** The Paystack webhook is
+mounted with `express.raw()` *before* `express.json()` so the signature can be
+checked against the untouched bytes, and the public routes (`/wallets/fund/
+callback`, `/invites/:code`) are mounted before the routers that blanket-apply
+`requireAuth`, which would otherwise 401 them.
 
-`APP_BASE_URL` in the backend `.env` is the origin invite links are built
-against (default `http://localhost:5173`). Set it to wherever the frontend
-is actually served or the links you share will point nowhere.
+---
 
-`npm run migrate` is safe to re-run on an existing wallet database — the Ajo
-tables are additive and the changes to `wallets` and `transactions` are
-written as idempotent `ALTER`s, so existing users, balances, and ledger
-history are preserved.
+## Data model
 
-## Frontend design notes
+| Table | Holds |
+|---|---|
+| `users` | account + bcrypt hash |
+| `wallets` | one per user (`kind='user'`), plus one pot per contribution (`kind='escrow'`, no `user_id`) |
+| `transactions` | one row per money-moving operation, keyed by a unique `idempotency_key` |
+| `ledger_entries` | append-only debit/credit rows — the source of truth |
+| `contributions` | an Ajo group: amount, frequency, member limit, start date, invite code, status |
+| `contribution_members` | who is in, which payout slot they hold, how many rounds they've missed |
+| `contribution_rounds` | one row per rotation: recipient, due date, expected pot |
+| `round_contributions` | one row per member per round: did their money actually arrive |
 
-The UI is deliberately built to look like the thing it represents: a ledger.
-It borrows from classic green-bar continuous-feed accounting paper —
-striped rows, tabular monospace numbers, and ink-stamp style badges for
-credit/debit — rather than a generic dark-mode fintech dashboard. The
-perforated left edge on the ledger table is the one intentional flourish;
-everything else stays quiet so that detail can stand out.
+All amounts are `NUMERIC(18,2)`. `wallets.balance` is a **cache** derived from
+`ledger_entries`; if it ever looks wrong, sum the ledger to reconcile.
+
+---
 
 ## Auth
 
-Every wallet/transfer route requires a JWT from `/auth/register` or
-`/auth/login`, sent as `Authorization: Bearer <token>`. Each user gets
-exactly one wallet, created atomically at registration — there's no way
-for a user to exist without a wallet or vice versa.
+Every wallet, transfer and contribution route needs a JWT from
+`/auth/register` or `/auth/login`, sent as `Authorization: Bearer <token>`.
+Tokens last 7 days.
 
-Key design point: which wallet a request affects is **never** taken from
-the request body. `/wallets/me`, `/wallets/me/fund`, and `POST /transfers`
-all resolve the wallet from `req.userId` (set by the auth middleware from
-the verified token). A user cannot fund or transfer out of a wallet that
-isn't theirs, no matter what they put in the JSON body.
+Each user gets exactly one wallet, created in the same DB transaction as the
+user — there is no way for a user to exist without a wallet.
 
-Sending money is done by the recipient's **email**, not their wallet ID —
-`/users/lookup?email=` resolves a name for a confirmation UI but
-deliberately never returns balance or wallet ID, so it can't be used to
-snoop on other users' accounts.
+The key design point: **which wallet a request affects is never taken from the
+request body.** `/wallets/me`, `/wallets/me/fund` and `POST /transfers` all
+resolve the wallet from `req.userId`, which the auth middleware sets from the
+verified token. A user cannot fund or spend from a wallet that isn't theirs no
+matter what JSON they send.
+
+Sending money is done by the recipient's **email**, not a wallet ID.
+`/users/lookup?email=` resolves a name so the UI can show a confirmation, and
+deliberately returns *only* the name — never a balance or wallet ID — so it
+can't be used to snoop on other accounts. Login returns the same error for
+"no such user" and "wrong password" so emails can't be enumerated.
+
+---
 
 ## Endpoints
 
-| Method | Path                | Auth required | Purpose                          |
-|--------|---------------------|:---:|-----------------------------------|
-| POST   | /auth/register      | No  | Create account + wallet, get a token |
-| POST   | /auth/login         | No  | Get a token                        |
-| GET    | /wallets/me         | Yes | My wallet + balance                |
-| GET    | /wallets/me/ledger  | Yes | My transaction history             |
-| GET    | /users/lookup       | Yes | Look up a recipient's name by email |
-| POST   | /wallets/me/fund    | Yes | Start a Paystack deposit           |
-| POST   | /webhooks/paystack  | No* | Paystack calls this — signature-verified instead of auth'd |
-| POST   | /transfers          | Yes | Send money to another user by email |
-| POST   | /contributions      | Yes | Start an Ajo, returns the invite link |
-| GET    | /contributions      | Yes | Every Ajo I created or joined       |
-| GET    | /contributions/:id  | Yes | Members, rounds, and my position — members only |
-| GET    | /invites/:code      | **No** | Preview an invite before signing up |
-| POST   | /invites/:code/join | Yes | Accept an invite                    |
-| PUT    | /contributions/:id/payout-order | Yes | Creator sets who collects first |
-| POST   | /contributions/:id/cancel | Yes | Creator cancels, only before it starts |
-| POST   | /contributions/:id/leave  | Yes | Member leaves, only before it starts |
-| POST   | /contributions/:id/run    | Yes | Advance this Ajo now instead of waiting for the sweep |
+| Method | Path | Auth | Purpose |
+|---|---|:---:|---|
+| POST | `/auth/register` | – | Create account + wallet, get a token |
+| POST | `/auth/login` | – | Get a token |
+| GET | `/wallets/me` | ✓ | My wallet and balance |
+| GET | `/wallets/me/ledger` | ✓ | My ledger entries, newest first |
+| GET | `/users/lookup?email=` | ✓ | Resolve a recipient's name |
+| POST | `/wallets/me/fund` | ✓ | Start a Paystack deposit → `authorization_url` |
+| GET | `/wallets/fund/callback` | – | HTML receipt page Paystack redirects back to |
+| POST | `/webhooks/paystack` | signature | Paystack calls this; the only path that credits a wallet |
+| POST | `/transfers` | ✓ | Send money to another user by email |
+| POST | `/contributions` | ✓ | Start an Ajo, returns the invite link |
+| GET | `/contributions` | ✓ | Every Ajo I created or joined |
+| GET | `/contributions/:id` | ✓ | Members, rounds, my position — members only |
+| GET | `/invites/:code` | **–** | Preview an invite before signing up |
+| POST | `/invites/:code/join` | ✓ | Accept an invite |
+| PUT | `/contributions/:id/payout-order` | ✓ | Creator sets who collects when |
+| POST | `/contributions/:id/cancel` | ✓ | Creator cancels — only before it starts |
+| POST | `/contributions/:id/leave` | ✓ | Member leaves — only before it starts |
+| POST | `/contributions/:id/run` | ✓ | Advance this Ajo now instead of waiting for the sweep |
 
-`POST /wallets/me/fund` and `POST /transfers` both **require** an
-`Idempotency-Key` header (any unique string per attempt — a UUID from
-your client is fine). Retrying the same key returns the original result
-instead of processing again. The Ajo engine generates its own keys instead
-(see below), because nobody is holding a browser tab open when a round runs.
+### Idempotency
 
-`GET /invites/:code` is the one deliberately public Ajo route — someone
-receiving a link on WhatsApp has to be able to see what they are being
-invited to before they have an account. It returns only what you need to
-decide: the group's name, the amount, the rhythm, how many seats are left.
-No member emails, no pot balance, no wallet IDs. It is mounted **before**
-the routers that blanket-require a token, since those 401 anything that
-reaches them.
+`POST /wallets/me/fund` and `POST /transfers` **require** an `Idempotency-Key`
+header — any unique string per attempt, a client-side UUID is fine. Retrying
+with the same key returns the original result instead of moving money twice.
+
+```bash
+curl -X POST localhost:4000/transfers \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" \
+  -d '{"toEmail":"ada@example.com","amount":2500}'
+```
+
+The Ajo engine can't ask a browser for a key — nobody is holding a tab open
+when a round runs at 3am — so it *derives* them from the rows themselves:
+`ajo:contribution:<round_contribution_id>` and `ajo:payout:<round_id>`. Those
+are stable across retries by construction.
+
+### The public invite route
+
+`GET /invites/:code` is the one deliberately unauthenticated Ajo route —
+someone who receives a link on WhatsApp has to be able to see what they're
+being invited to before they have an account. It returns the group's name,
+amount, rhythm, seats left, and what the pot is worth when full. No member
+emails, no current pot balance, no wallet IDs.
+
+### The funding flow
+
+```
+POST /wallets/me/fund  ──►  Paystack hosted page  ──►  GET /wallets/fund/callback
+                                    │                        (receipt page only)
+                                    └──► POST /webhooks/paystack  ──► wallet credited
+```
+
+The browser redirect is a **receipt, not evidence**. A user can reach the
+callback URL without paying, so it only reads the transaction's current status
+and renders it. Only the signature-verified webhook ever writes a credit.
+
+To exercise this locally you need a public URL for the webhook — expose port
+4000 with a tunnel (ngrok, cloudflared) and set that as the webhook URL in
+your Paystack dashboard. Card `4084 0840 8408 4081` works on test keys.
+
+---
 
 ## How an Ajo runs
 
@@ -111,126 +249,109 @@ open ──(start date arrives, 2+ members)──► active ──(last round pa
   └──(creator cancels)──► cancelled
 ```
 
-**While it's open** anyone with the link can join, up to the member limit.
-The creator arranges the payout order — who collects in round 1, round 2,
-and so on. Members can leave; the creator can cancel. Nothing has moved yet.
+**While it's open**, anyone with the link can join, up to the member limit.
+The creator arranges the payout order. Members can leave, the creator can
+cancel. Nothing has moved yet.
 
-**When the start date arrives** the group locks. Membership is frozen and
-the whole schedule is written out at once: N members means N rounds, one per
-member, spaced by the chosen frequency. Slots get renumbered to a clean
-1..N at this point — if the creator arranged six people but only four turned
-up, their chosen *ordering* survives and the gaps are squeezed out.
+**When the start date arrives** the group locks. Membership is frozen and the
+whole schedule is written at once: N members means N rounds, one per member,
+spaced by the chosen frequency. Slots are renumbered to a clean 1..N here — if
+the creator arranged six people and only four turned up, their *ordering*
+survives and the gaps are squeezed out.
 
-**Each round** the engine debits every member's wallet and credits the pot.
-Once the pot is whole it pays out to whoever holds that round's slot. The
-recipient pays in too — that's how ajo works; they just take the pot home
-the same day.
+**Each round** the engine debits every member's wallet and credits the pot,
+then pays the whole pot to whoever holds that round's slot. The recipient pays
+in too — that's how ajo works, they just take the pot home the same day.
 
-**If someone's wallet is short**, their payment stays pending and is retried
-on the next sweep. The round does not pay out until it is fully collected,
-so one member being broke delays the round rather than shorting the
-recipient. Nothing is created out of thin air to cover them.
+**If someone's wallet is short**, their contribution stays `pending` and is
+retried on the next sweep. The round does not pay out until it is fully
+collected, so one member being broke *delays* the round rather than shorting
+the recipient. Nothing is invented to cover them, and their `missed_rounds`
+counter goes up once.
 
-A background sweep (`scheduler.js`, every 60s) does this for every live
-group. `POST /contributions/:id/run` triggers the same code for one group,
-which is what the "Check for due rounds now" button calls — handy for
-demoing without waiting on the clock.
+`scheduler.js` runs this over every live group every 60 seconds.
+`POST /contributions/:id/run` executes the same code for a single group, which
+is what the UI's "Check for due rounds now" button calls — handy for demoing
+without waiting on the clock.
 
-## The concepts this project is built to teach
+---
 
-**1. Money is NUMERIC, never FLOAT.**
-`schema.sql` stores all amounts as `NUMERIC(18,2)`. Floats introduce
-rounding errors that compound over thousands of transactions — never use
-them for currency.
+## The ideas this codebase is built around
+
+**1. Money is `NUMERIC`, never `FLOAT`.** Floats accumulate rounding error
+that compounds over thousands of transactions.
 
 **2. The ledger is the source of truth, not the balance column.**
-`ledger_entries` is append-only: every credit and debit gets its own row,
-and rows are never edited or deleted. `wallets.balance` is a cache for
-fast reads. If it ever looks wrong, you can rebuild it by summing the
-ledger. This is the "double-entry" idea — every transfer writes both a
-debit row and a credit row, so money is never created or destroyed, only
-moved.
+`ledger_entries` is append-only; rows are never edited or deleted. Every
+transfer writes both a debit row and a credit row, so money is never created
+or destroyed, only moved. `wallets.balance` is a cache for fast reads.
 
-**3. Row locking prevents race conditions.**
-`SELECT ... FOR UPDATE` inside a transaction (`ledger.js`) locks a
-wallet's row for the duration of the operation. Without this, two
-simultaneous requests could both read the same starting balance and
-both "succeed," silently losing one of the updates. Transfers lock both
-wallets in a consistent sorted order to avoid deadlocking against an
-opposite-direction transfer happening at the same time.
+**3. Row locking prevents lost updates.** `SELECT ... FOR UPDATE` inside a
+transaction locks the wallet row for the duration of the operation. Without
+it, two simultaneous requests could read the same starting balance and both
+"succeed", silently losing one. Transfers lock both wallets in sorted-by-id
+order so two opposite-direction transfers can't deadlock each other.
 
-**4. Idempotency keys prevent double-processing.**
-`idempotency.js` reserves a unique key before doing any work. A network
-timeout that causes a client to retry a "Send Money" request will hit
-the same key twice — the second attempt returns the first result instead
-of moving money again.
+**4. Idempotency keys prevent double-processing.** `idempotency.js` reserves
+the key by inserting the transaction row *before* any work happens. The unique
+constraint on the key *is* the guarantee.
 
-**5. Webhooks are verified, not trusted.**
-`webhooks.js` recomputes the HMAC-SHA512 signature Paystack sent and
-compares it before treating the payload as real. The wallet is only
-credited here — never from the client-side payment redirect, which a
-user could reach without actually paying.
+**5. Webhooks are verified, not trusted.** `webhooks.js` recomputes the
+HMAC-SHA512 of the raw body with your secret key and compares it before
+believing a word of the payload.
 
-**6. Everything money-related happens inside a DB transaction.**
-`withTransaction` in `pool.js` ensures that if any step of a
-multi-step money operation fails, all of it rolls back — you never end
-up with a debit that happened but a credit that didn't.
+**6. Every money operation runs inside one DB transaction.**
+`withTransaction()` makes BEGIN/COMMIT/ROLLBACK impossible to forget, so you
+never end up with a debit that happened and a credit that didn't.
 
-**7. The group's pot is a real wallet, not a number in a column.**
-Each contribution owns a `wallets` row with `kind='escrow'` and no
-`user_id`. Money entering and leaving the pot writes ordinary double-entry
-ledger rows, so a contribution is auditable with the exact same queries as
-everything else, and the pot's balance is derived rather than tracked
-separately. The old "one wallet per user" rule survives as a *partial*
-unique index (`WHERE kind = 'user'`) so escrow wallets are exempt without
-loosening the rule for people.
+**7. The group's pot is a real wallet, not a number in a column.** Each
+contribution owns a `wallets` row with `kind='escrow'`. Money entering and
+leaving the pot writes ordinary double-entry rows, so a contribution is
+auditable with the exact same queries as everything else. The "one wallet per
+user" rule survives as a *partial* unique index (`WHERE kind = 'user'`), which
+exempts escrow wallets without loosening the rule for people.
 
-**8. Idempotency keys can be derived instead of supplied.**
-A browser can generate a UUID per click, but the Ajo engine runs on a timer
-with nobody watching. So it derives its keys from the rows themselves —
-`ajo:contribution:<round_contribution_id>` and `ajo:payout:<round_id>`.
-Those are stable across retries by construction, so a sweep that runs twice,
-overlaps itself, or resumes after a crash cannot debit anybody a second
-time. The uniqueness of the key *is* the guarantee.
+**8. Expected failures must not poison the transaction.** A member with an
+empty wallet is a normal Tuesday, not an error. `debitWallet` checks the
+balance in JS and throws *before* issuing SQL that would fail, so the
+surrounding transaction stays healthy and can record the miss and carry on
+collecting from everyone else. Letting Postgres reject the write via the
+`balance >= 0` constraint would poison the transaction and roll back the
+members who *did* pay.
 
-**9. Expected failures must not poison the transaction.**
-A member with an empty wallet is a normal Tuesday, not an error. `debitWallet`
-checks the balance in JS and throws *before* issuing any SQL that would
-fail, which means the surrounding transaction is still healthy and can catch
-it, record the miss, and carry on collecting from everyone else. Had it let
-Postgres reject the write via the `balance >= 0` constraint, the whole
-transaction would be poisoned and the members who *did* pay would be rolled
-back with it.
+**9. Rounds are strictly sequential.** If round 1 can't close, round 2 doesn't
+start — the engine breaks out of the loop rather than skipping ahead. Nobody
+collects out of turn because someone else was short that week.
 
-**10. Rounds are strictly sequential.**
-If round 1 can't close, round 2 doesn't start — the engine breaks out of the
-loop rather than skipping ahead. Nobody collects out of turn because someone
-else was short that week.
+**10. Concurrent sweeps are safe.** `FOR UPDATE SKIP LOCKED` means an
+overlapping tick moves on rather than queueing up to redo the work, and the
+derived idempotency keys mean even a crash-and-resume can't double-debit.
 
-**11. Calendar days are not instants.**
-`pool.js` parses Postgres `DATE` columns as plain `'YYYY-MM-DD'` strings.
-node-postgres would otherwise hand back a JS `Date` at *local* midnight,
-which serialises to the previous day in UTC anywhere east of Greenwich — in
-Lagos (UTC+1) every due date would reach the browser one day early. A due
-date is a day, not a moment, and is carried as one end to end.
+**11. Calendar days are not instants.** `pool.js` parses Postgres `DATE`
+columns as plain `'YYYY-MM-DD'` strings. node-postgres would otherwise build a
+JS `Date` at *local* midnight, which serialises to the previous day in UTC
+anywhere east of Greenwich — in Lagos every due date would reach the browser a
+day early. A due date is a day, not a moment, and is carried as one end to end.
 
-## What's intentionally left out (for a "small" version)
+---
 
-- Reconciliation job to compare `wallets.balance` against summed ledger
-- Currency conversion / multi-currency transfers
-- Rate limiting on the webhook endpoint
-- Retry/backoff on the Paystack API call itself
+## Known gaps
 
-On the Ajo side specifically:
+Deliberately out of scope for a small version:
 
-- **Notifications.** Nobody is told "your round is due in 2 days" or "the pot
-  is waiting on you" — `missed_rounds` is recorded and shown in the UI, but
-  the nudging is manual. This is the most valuable next thing to build.
-- **A penalty or removal policy for defaulters.** A member who never funds
-  their wallet stalls their group indefinitely. The engine handles this
-  safely (it just keeps waiting) but there is no rule for resolving it.
-- **Auto-debiting from a card** when the wallet is short, rather than only
-  from the wallet balance.
-- **Multi-node scheduling.** The sweep is an in-process `setInterval`. It is
-  safe to run twice over (`SKIP LOCKED` plus derived idempotency keys), but
-  across several server instances you'd want a real job runner.
+- No reconciliation job comparing `wallets.balance` against the summed ledger.
+- No multi-currency or conversion — `currency` is stored but never converted.
+- No rate limiting on the webhook endpoint, and no retry/backoff around the
+  Paystack API call itself.
+- **No notifications.** Nobody is told "your round is due in 2 days" or "the
+  pot is waiting on you". `missed_rounds` is recorded and shown, but the
+  nudging is manual. This is the most valuable next thing to build.
+- **No defaulter policy.** A member who never funds their wallet stalls their
+  group indefinitely. The engine handles it *safely* — it just keeps waiting —
+  but there is no rule for resolving it.
+- No auto-debit from a card when the wallet is short.
+- **Single-node scheduling.** The sweep is an in-process `setInterval`. It is
+  safe to run twice over, but across several instances you'd want a real job
+  runner with a shared lock.
+- `lucide-react` is listed in `dependencies` here but belongs to the frontend;
+  harmless, but it can be dropped.
