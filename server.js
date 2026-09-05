@@ -18,9 +18,20 @@ if (!process.env.JWT_SECRET) {
 }
 
 const app = express();
+// Browsers send Origin without a trailing slash or path, so these must be
+// bare scheme+host entries to match. Extra origins can be added at deploy
+// time via CORS_ORIGINS, as a comma-separated list.
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://neon-salmiakki-04c60d.netlify.app",
+  ...(process.env.CORS_ORIGINS || "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean),
+];
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: allowedOrigins,
   }),
 );
 

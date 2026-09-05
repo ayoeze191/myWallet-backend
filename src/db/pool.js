@@ -1,5 +1,5 @@
-const { Pool, types } = require('pg');
-require('dotenv').config();
+const { Pool, types } = require("pg");
+require("dotenv").config();
 
 // Hand DATE columns back as plain 'YYYY-MM-DD' strings.
 // By default node-postgres builds a JS Date at LOCAL midnight, which then
@@ -20,12 +20,12 @@ const pool = new Pool({
 async function withTransaction(fn) {
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    await client.query("BEGIN");
     const result = await fn(client);
-    await client.query('COMMIT');
+    await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
