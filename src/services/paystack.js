@@ -21,18 +21,69 @@ async function initializeTransaction({ email, amount, reference }) {
   return response.data.data;
 }
 
-// Paystack's own record of a charge, or null if it has no transaction with
-// this reference (e.g. initialize never reached it).
-async function verifyTransaction(reference) {
+// A GET where "Paystack has no such thing" resolves to null, not an error.
+async function getOrNull(path, params) {
   try {
-    const response = await paystackClient.get(
-      `/transaction/verify/${encodeURIComponent(reference)}`,
-    );
+    const response = await paystackClient.get(path, { params });
     return response.data.data;
   } catch (err) {
-    if (err.response && [400, 404].includes(err.response.status)) return null;
+    if (err.response && [400, 404, 422].includes(err.response.status)) return null;
     throw err;
   }
+}
+
+// Paystack's own record of a charge, or null if it has no transaction with
+// this reference (e.g. initialize never reached it).
+function verifyTransaction(reference) {
+  return getOrNull(`/transaction/verify/${encodeURIComponent(reference)}`);
+}
+
+function verifyTransfer(reference) {
+  return getOrNull(`/transfer/verify/${encodeURIComponent(reference)}`);
+}
+
+// { account_number, account_name }, or null if the bank has no such account.
+function resolveAccount(accountNumber, bankCode) {
+  return getOrNull("/bank/resolve", {
+    account_number: accountNumber,
+    bank_code: bankCode,
+  });
+}
+
+async function listBanks() {
+  const banks = [];
+  let next;
+  for (let page = 0; page < 20; page++) {
+    const response = await paystackClient.get("/bank", {
+      params: { country: "nigeria", use_cursor: true, perPage: 100, next },
+    });
+    banks.push(...response.data.data);
+    next = response.data.meta?.next;
+    if (!next) break;
+  }
+  return banks;
+}
+
+async function createTransferRecipient({ name, accountNumber, bankCode }) {
+  const response = await paystackClient.post("/transferrecipient", {
+    type: "nuban",
+    name,
+    account_number: accountNumber,
+    bank_code: bankCode,
+    currency: "NGN",
+  });
+  return response.data.data;
+}
+
+async function initiateTransfer({ amountKobo, recipient, reference, reason }) {
+  const response = await paystackClient.post("/transfer", {
+    source: "balance",
+    amount: amountKobo,
+    recipient,
+    reference,
+    reason,
+  });
+  return response.data.data;
 }
 
 function verifyWebhookSignature(rawBody, signatureHeader) {
@@ -43,4 +94,13 @@ function verifyWebhookSignature(rawBody, signatureHeader) {
   return hash === signatureHeader;
 }
 
-module.exports = { initializeTransaction, verifyTransaction, verifyWebhookSignature };
+module.exports = {
+  initializeTransaction,
+  verifyTransaction,
+  verifyTransfer,
+  resolveAccount,
+  listBanks,
+  createTransferRecipient,
+  initiateTransfer,
+  verifyWebhookSignature,
+};

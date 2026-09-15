@@ -1,6 +1,7 @@
 const { withTransaction } = require('../db/pool');
+const { getFeeWalletId } = require('./fees');
 
-async function creditWallet({ client, walletId, amount, transactionId }) {
+async function creditWallet({ client, walletId, amount, transactionId, memo = null }) {
   const { rows } = await client.query(
     'SELECT balance FROM wallets WHERE id = $1 FOR UPDATE',
     [walletId]
@@ -15,15 +16,15 @@ async function creditWallet({ client, walletId, amount, transactionId }) {
   ]);
 
   await client.query(
-    `INSERT INTO ledger_entries (transaction_id, wallet_id, direction, amount, balance_after)
-     VALUES ($1, $2, 'credit', $3, $4)`,
-    [transactionId, walletId, amount, newBalance]
+    `INSERT INTO ledger_entries (transaction_id, wallet_id, direction, amount, balance_after, memo)
+     VALUES ($1, $2, 'credit', $3, $4, $5)`,
+    [transactionId, walletId, amount, newBalance, memo]
   );
 
   return newBalance;
 }
 
-async function debitWallet({ client, walletId, amount, transactionId }) {
+async function debitWallet({ client, walletId, amount, transactionId, memo = null }) {
   const { rows } = await client.query(
     'SELECT balance FROM wallets WHERE id = $1 FOR UPDATE',
     [walletId]
@@ -43,15 +44,39 @@ async function debitWallet({ client, walletId, amount, transactionId }) {
   ]);
 
   await client.query(
-    `INSERT INTO ledger_entries (transaction_id, wallet_id, direction, amount, balance_after)
-     VALUES ($1, $2, 'debit', $3, $4)`,
-    [transactionId, walletId, amount, newBalance]
+    `INSERT INTO ledger_entries (transaction_id, wallet_id, direction, amount, balance_after, memo)
+     VALUES ($1, $2, 'debit', $3, $4, $5)`,
+    [transactionId, walletId, amount, newBalance, memo]
   );
 
   return newBalance;
 }
 
-async function transferBetweenWallets({ fromWalletId, toWalletId, amount, transactionId }) {
+// The fee wallet is always locked after any user wallet in the same
+// transaction, so concurrent transfers can't deadlock on it.
+async function chargeFee({ client, walletId, fee, transactionId }) {
+  await debitWallet({ client, walletId, amount: fee, transactionId, memo: 'fee' });
+  await creditWallet({
+    client,
+    walletId: await getFeeWalletId(client),
+    amount: fee,
+    transactionId,
+    memo: 'fee',
+  });
+}
+
+async function refundFee({ client, walletId, fee, transactionId }) {
+  await creditWallet({ client, walletId, amount: fee, transactionId, memo: 'fee refund' });
+  await debitWallet({
+    client,
+    walletId: await getFeeWalletId(client),
+    amount: fee,
+    transactionId,
+    memo: 'fee refund',
+  });
+}
+
+async function transferBetweenWallets({ fromWalletId, toWalletId, amount, fee = 0, transactionId }) {
   return withTransaction(async (client) => {
     const [firstId, secondId] = [fromWalletId, toWalletId].sort();
     await client.query('SELECT id FROM wallets WHERE id = $1 FOR UPDATE', [firstId]);
@@ -59,6 +84,9 @@ async function transferBetweenWallets({ fromWalletId, toWalletId, amount, transa
 
     await debitWallet({ client, walletId: fromWalletId, amount, transactionId });
     await creditWallet({ client, walletId: toWalletId, amount, transactionId });
+    if (Number(fee) > 0) {
+      await chargeFee({ client, walletId: fromWalletId, fee, transactionId });
+    }
   });
 }
 
@@ -69,4 +97,11 @@ class WalletError extends Error {
   }
 }
 
-module.exports = { creditWallet, debitWallet, transferBetweenWallets, WalletError };
+module.exports = {
+  creditWallet,
+  debitWallet,
+  chargeFee,
+  refundFee,
+  transferBetweenWallets,
+  WalletError,
+};
