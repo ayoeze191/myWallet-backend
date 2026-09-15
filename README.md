@@ -134,9 +134,10 @@ src/
     auth.js                bcrypt + JWT
     ledger.js              creditWallet / debitWallet / transferBetweenWallets
     idempotency.js         reserve a transaction by key, mark its status
-    paystack.js            initialize a charge, verify a webhook signature
+    paystack.js            initialize / verify a charge, verify a webhook signature
+    funding.js             credit a charge exactly once; recover lost webhooks
     ajo.js                 the rotation engine
-    scheduler.js           60s sweep over live contributions
+    scheduler.js           60s sweeps: live contributions, pending payments
 ```
 
 **Mounting order in `server.js` is load-bearing.** The Paystack webhook is
@@ -203,7 +204,7 @@ can't be used to snoop on other accounts. Login returns the same error for
 | POST | `/transfers` | ✓ | Send money to another user by email |
 | POST | `/contributions` | ✓ | Start an Ajo, returns the invite link |
 | GET | `/contributions` | ✓ | Every Ajo I created or joined |
-| GET | `/contributions/:id` | ✓ | Members, rounds, my position — members only |
+| GET | `/contributions/:id` | ✓ | Members, rounds, my position — members only. Each round has `is_due` and `payments: [{ member_id, user_id, name, status, paid_at, missed }]` — who has paid and who still owes |
 | GET | `/invites/:code` | **–** | Preview an invite before signing up |
 | POST | `/invites/:code/join` | ✓ | Accept an invite |
 | PUT | `/contributions/:id/payout-order` | ✓ | Creator sets who collects when |
@@ -247,8 +248,23 @@ POST /wallets/me/fund  ──►  Paystack hosted page  ──►  GET /wallets/
 ```
 
 The browser redirect is a **receipt, not evidence**. A user can reach the
-callback URL without paying, so it only reads the transaction's current status
-and renders it. Only the signature-verified webhook ever writes a credit.
+callback URL without paying, so it never trusts its own query string. Money is
+credited only on Paystack's word, which arrives one of three ways:
+
+1. **The webhook** — signature-verified, the normal path.
+2. **The callback page** — if the transaction is still pending when the user
+   lands, it calls Paystack's `GET /transaction/verify/:reference` before
+   rendering, so a late or lost webhook doesn't leave them on "processing".
+3. **The funding sweep** — every 60s the scheduler verifies fund transactions
+   that have been pending for over a minute. This catches payments whose
+   webhook never arrived *and* whose user never came back (closed the tab,
+   lost network, server was asleep).
+
+All three go through `creditFunding`, which locks the transaction row and
+credits only if it isn't already `success`, so any mix of them credits once.
+A charge Paystack reports as `failed` is marked failed straight away; one that
+is `abandoned` (or unknown to Paystack) is given 24 hours, since a customer can
+still finish a checkout late.
 
 To exercise this locally you need a public URL for the webhook — expose port
 4000 with a tunnel (ngrok, cloudflared) and set that as the webhook URL in

@@ -1,6 +1,7 @@
 const express = require("express");
 const { pool } = require("../db/pool");
 const { FRONTEND_BASE_URL } = require("../config");
+const { reconcileFunding } = require("../services/funding");
 
 const router = express.Router();
 
@@ -23,11 +24,23 @@ router.get("/wallets/fund/callback", async (req, res, next) => {
     let status = "missing";
 
     if (typeof reference === "string" && reference.startsWith("fund_")) {
-      const { rows } = await pool.query(
-        "SELECT status FROM transactions WHERE paystack_reference = $1 AND type = 'fund'",
-        [reference],
-      );
-      status = rows[0]?.status || "not_found";
+      const readStatus = async () => {
+        const { rows } = await pool.query(
+          "SELECT status FROM transactions WHERE paystack_reference = $1 AND type = 'fund'",
+          [reference],
+        );
+        return rows[0]?.status || "not_found";
+      };
+      status = await readStatus();
+
+      // The webhook may be late or lost; ask Paystack directly instead of
+      // leaving the user on "processing".
+      if (status === "pending") {
+        await reconcileFunding(reference).catch((err) =>
+          console.error(`[funding] could not reconcile ${reference}:`, err.message),
+        );
+        status = await readStatus();
+      }
     }
 
     const copy = {

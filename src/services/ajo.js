@@ -535,6 +535,7 @@ async function getContributionDetail({ contributionId, userId }) {
 
   const { rows: rounds } = await pool.query(
     `SELECT r.*, u.name AS recipient_name, m.user_id AS recipient_user_id,
+            (r.due_date <= CURRENT_DATE) AS is_due,
             (SELECT count(*)::int FROM round_contributions rc
               WHERE rc.round_id = r.id AND rc.status = 'paid') AS paid_count,
             (SELECT count(*)::int FROM round_contributions rc WHERE rc.round_id = r.id) AS member_count,
@@ -547,6 +548,25 @@ async function getContributionDetail({ contributionId, userId }) {
      ORDER BY r.round_number`,
     [contributionId, me.id]
   );
+
+  // Who has paid and who still owes, per round. "missed" means a collection
+  // was attempted and bounced; the reason (last_error) stays private.
+  const { rows: payments } = await pool.query(
+    `SELECT rc.round_id, rc.member_id, m.user_id, u.name, rc.status, rc.paid_at,
+            (rc.status = 'pending' AND rc.attempts > 0) AS missed
+     FROM round_contributions rc
+     JOIN contribution_rounds r ON r.id = rc.round_id
+     JOIN contribution_members m ON m.id = rc.member_id
+     JOIN users u ON u.id = m.user_id
+     WHERE r.contribution_id = $1
+     ORDER BY m.payout_slot`,
+    [contributionId]
+  );
+  for (const round of rounds) {
+    round.payments = payments
+      .filter((p) => p.round_id === round.id)
+      .map(({ round_id, ...payment }) => payment);
+  }
 
   return { contribution, members, rounds, me };
 }

@@ -1,33 +1,47 @@
 const { runDueContributions } = require('./ajo');
+const { reconcilePendingFunding } = require('./funding');
 
 const TICK_MS = Number(process.env.AJO_TICK_MS || 60_000);
+const FUNDING_TICK_MS = 60_000;
 
-function startAjoScheduler() {
+// Runs fn now and then every `ms`, skipping a tick while the last run is
+// still going. Each job has its own guard, so a slow Paystack can't stall
+// ajo collections.
+function every(ms, label, fn) {
   let running = false;
 
   async function tick() {
     if (running) return;
     running = true;
     try {
-      const results = await runDueContributions();
-      const worked = results.filter((r) => r.processed);
-      for (const r of worked) {
-        if (r.roundsPaid?.length) {
-          console.log(`[ajo] ${r.id} paid out round(s) ${r.roundsPaid.join(', ')}`);
-        }
-        if (r.completed) console.log(`[ajo] ${r.id} completed its final round`);
-      }
+      await fn();
     } catch (err) {
-      console.error('[ajo] scheduler sweep failed:', err);
+      console.error(`[${label}] sweep failed:`, err);
     } finally {
       running = false;
     }
   }
 
-  const timer = setInterval(tick, TICK_MS);
+  const timer = setInterval(tick, ms);
   timer.unref();
   tick();
   return timer;
 }
 
-module.exports = { startAjoScheduler };
+async function ajoSweep() {
+  const results = await runDueContributions();
+  const worked = results.filter((r) => r.processed);
+  for (const r of worked) {
+    if (r.roundsPaid?.length) {
+      console.log(`[ajo] ${r.id} paid out round(s) ${r.roundsPaid.join(', ')}`);
+    }
+    if (r.completed) console.log(`[ajo] ${r.id} completed its final round`);
+  }
+}
+
+function startSchedulers() {
+  every(TICK_MS, 'ajo', ajoSweep);
+  every(FUNDING_TICK_MS, 'funding', reconcilePendingFunding);
+}
+
+module.exports = { startSchedulers };

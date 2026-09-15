@@ -4,6 +4,7 @@ const { APP_BASE_URL } = require("../config");
 
 const paystackClient = axios.create({
   baseURL: process.env.PAYSTACK_BASE_URL || "https://api.paystack.co",
+  timeout: 15000,
   headers: {
     Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
     "Content-Type": "application/json",
@@ -20,6 +21,20 @@ async function initializeTransaction({ email, amount, reference }) {
   return response.data.data;
 }
 
+// Paystack's own record of a charge, or null if it has no transaction with
+// this reference (e.g. initialize never reached it).
+async function verifyTransaction(reference) {
+  try {
+    const response = await paystackClient.get(
+      `/transaction/verify/${encodeURIComponent(reference)}`,
+    );
+    return response.data.data;
+  } catch (err) {
+    if (err.response && [400, 404].includes(err.response.status)) return null;
+    throw err;
+  }
+}
+
 function verifyWebhookSignature(rawBody, signatureHeader) {
   const hash = crypto
     .createHmac("sha512", process.env.PAYSTACK_SECRET_KEY)
@@ -28,4 +43,4 @@ function verifyWebhookSignature(rawBody, signatureHeader) {
   return hash === signatureHeader;
 }
 
-module.exports = { initializeTransaction, verifyWebhookSignature };
+module.exports = { initializeTransaction, verifyTransaction, verifyWebhookSignature };

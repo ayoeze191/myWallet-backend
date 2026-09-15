@@ -11,7 +11,7 @@ const {
   publicContributionRoutes,
   contributionRoutes,
 } = require("./src/routes/contributions");
-const { startAjoScheduler } = require("./src/services/scheduler");
+const { startSchedulers } = require("./src/services/scheduler");
 
 if (!process.env.JWT_SECRET) {
   console.error("JWT_SECRET is not set in .env — refusing to start.");
@@ -54,5 +54,5 @@ app.listen(PORT, () => {
   console.log(`Ajo wallet system running on port ${PORT}`);
   console.log(`Invite links:     ${FRONTEND_BASE_URL}/join/<code>`);
   console.log(`Paystack returns: ${APP_BASE_URL}/wallets/fund/callback`);
-  startAjoScheduler();
+  startSchedulers();
 });

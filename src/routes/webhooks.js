@@ -1,7 +1,5 @@
 const express = require("express");
-const { withTransaction } = require("../db/pool");
-const { creditWallet } = require("../services/ledger");
-const { markTransactionStatus } = require("../services/idempotency");
+const { creditFunding } = require("../services/funding");
 const { verifyWebhookSignature } = require("../services/paystack");
 const { asyncRoute } = require("../middleware/asyncRoute");
 
@@ -18,25 +16,9 @@ router.post("/webhooks/paystack", asyncRoute(async (req, res) => {
   const event = JSON.parse(rawBody.toString("utf8"));
 
   if (event.event === "charge.success") {
-    const { reference, amount } = event.data;
-
-    // Lock the row so a retried or duplicate delivery waits here, then sees
-    // "success" and skips — the credit and the status flip commit together.
-    await withTransaction(async (client) => {
-      const { rows } = await client.query(
-        "SELECT * FROM transactions WHERE paystack_reference = $1 AND type = 'fund' FOR UPDATE",
-        [reference],
-      );
-      const transaction = rows[0];
-      if (!transaction || transaction.status === "success") return;
-
-      await creditWallet({
-        client,
-        walletId: transaction.metadata.walletId,
-        amount: amount / 100,
-        transactionId: transaction.id,
-      });
-      await markTransactionStatus(transaction.id, "success", client);
+    await creditFunding({
+      reference: event.data.reference,
+      amountKobo: event.data.amount,
     });
   }
 
