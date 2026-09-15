@@ -1,9 +1,16 @@
 const express = require("express");
 const { creditFunding } = require("../services/funding");
+const { settleWithdrawal } = require("../services/withdrawals");
 const { verifyWebhookSignature } = require("../services/paystack");
 const { asyncRoute } = require("../middleware/asyncRoute");
 
 const router = express.Router();
+
+const TRANSFER_OUTCOMES = {
+  "transfer.success": "success",
+  "transfer.failed": "failed",
+  "transfer.reversed": "failed",
+};
 
 router.post("/webhooks/paystack", asyncRoute(async (req, res) => {
   const signature = req.headers["x-paystack-signature"];
@@ -20,6 +27,10 @@ router.post("/webhooks/paystack", asyncRoute(async (req, res) => {
       reference: event.data.reference,
       amountKobo: event.data.amount,
     });
+  }
+
+  if (TRANSFER_OUTCOMES[event.event]) {
+    await settleWithdrawal(event.data.reference, TRANSFER_OUTCOMES[event.event], event.event);
   }
 
   res.sendStatus(200);

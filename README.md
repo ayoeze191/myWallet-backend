@@ -65,6 +65,10 @@ is replayed whole and every statement is written idempotently (`CREATE TABLE
 IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, `DROP CONSTRAINT IF EXISTS` before
 each `ADD CONSTRAINT`), so existing users, balances and ledger history survive.
 
+The server also applies it on every boot, before it starts listening, so a
+deploy can't run new code against an old schema. If the migration fails, the
+server refuses to start (on Render the previous deploy keeps serving).
+
 | Script | What it does |
 |---|---|
 | `npm start` | Run the server |
@@ -130,12 +134,15 @@ src/
     webhooks.js            Paystack charge.success — the only place money is credited
     fundCallback.js        HTML receipt page Paystack redirects the user back to
     contributions.js       Ajo routes, public invite preview split out
+    withdrawals.js         banks, account lookup, withdraw, history
   services/
     auth.js                bcrypt + JWT
     ledger.js              creditWallet / debitWallet / transferBetweenWallets
     idempotency.js         reserve a transaction by key, mark its status
     paystack.js            initialize / verify a charge, verify a webhook signature
     funding.js             credit a charge exactly once; recover lost webhooks
+    withdrawals.js         bank payouts: hold, send, refund on failure, reconcile
+    fees.js                fee schedules + the platform fee wallet
     ajo.js                 the rotation engine
     scheduler.js           60s sweeps: live contributions, pending payments
 ```
@@ -200,8 +207,13 @@ can't be used to snoop on other accounts. Login returns the same error for
 | GET | `/users/lookup?email=` | ✓ | Resolve a recipient's name |
 | POST | `/wallets/me/fund` | ✓ | Start a Paystack deposit → `authorization_url` |
 | GET | `/wallets/fund/callback` | – | HTML receipt page Paystack redirects back to |
-| POST | `/webhooks/paystack` | signature | Paystack calls this; the only path that credits a wallet |
-| POST | `/transfers` | ✓ | Send money to another user by email |
+| POST | `/webhooks/paystack` | signature | Paystack calls this for `charge.success` and `transfer.success` / `failed` / `reversed` |
+| POST | `/transfers` | ✓ | Send money to another user by email; fee charged on top |
+| GET | `/fees?type=transfer\|withdrawal&amount=` | ✓ | Fee quote → `{ amount, fee, total }`, to show before confirming |
+| GET | `/banks` | ✓ | Nigerian banks `[{ name, code }]`, cached 24h |
+| GET | `/banks/resolve?accountNumber=&bankCode=` | ✓ | Account name, so the user can confirm before withdrawing |
+| POST | `/wallets/me/withdraw` | ✓ | Withdraw to a bank account. Body `{ amount, bankCode, accountNumber, password }` |
+| GET | `/wallets/me/withdrawals` | ✓ | My withdrawals, newest first, with status `pending` / `success` / `failed` |
 | POST | `/contributions` | ✓ | Start an Ajo, returns the invite link |
 | GET | `/contributions` | ✓ | Every Ajo I created or joined |
 | GET | `/contributions/:id` | ✓ | Members, rounds, my position — members only. Each round has `is_due` and `payments: [{ member_id, user_id, name, status, paid_at, missed }]` — who has paid and who still owes |
@@ -214,7 +226,7 @@ can't be used to snoop on other accounts. Login returns the same error for
 
 ### Idempotency
 
-`POST /wallets/me/fund` and `POST /transfers` **require** an `Idempotency-Key`
+`POST /wallets/me/fund`, `POST /transfers` and `POST /wallets/me/withdraw` **require** an `Idempotency-Key`
 header — any unique string per attempt, a client-side UUID is fine. Retrying
 with the same key returns the original result instead of moving money twice.
 
@@ -269,6 +281,50 @@ still finish a checkout late.
 To exercise this locally you need a public URL for the webhook — expose port
 4000 with a tunnel (ngrok, cloudflared) and set that as the webhook URL in
 your Paystack dashboard. Card `4084 0840 8408 4081` works on test keys.
+
+### Withdrawals to a bank account
+
+```
+POST /wallets/me/withdraw
+  1. check password, resolve account name, create Paystack recipient
+  2. HOLD: debit amount + fee in one DB transaction   (status: pending)
+  3. POST Paystack /transfer with reference wd_<id>
+       ├─ Paystack says no (4xx) ──► refund now, 502 TRANSFER_REJECTED
+       ├─ no clear answer ─────────► keep holding; the sweep asks Paystack
+       └─ accepted ────────────────► pending until the webhook
+transfer.success ──► success          transfer.failed / reversed ──► refund
+```
+
+The money leaves the wallet *before* Paystack is asked to send it, so it can
+never be spent twice while a transfer is in flight. If the call to Paystack
+times out, we don't know whether the transfer exists, so nothing is refunded
+on a guess: every 60s the withdrawal sweep calls `GET /transfer/verify/:ref`
+for withdrawals pending over 2 minutes. Paystack's answer settles it; if
+Paystack has never heard of the reference after 10 minutes, the hold is
+released. `settleWithdrawal` locks the row and refunds at most once, so any
+mix of webhook, retry and sweep is safe.
+
+A password is required on every withdrawal: it's the one action a stolen
+token must not be able to do alone.
+
+**Paystack setup this needs:**
+- Transfers enabled on your Paystack business (live mode needs it approved).
+- **Transfer OTP turned off** in the dashboard preferences. With OTP on, every
+  transfer waits for a code sent to the business owner and sits in `pending`.
+- Money in your **Paystack balance**. Transfers are paid from it, and Paystack
+  normally settles your collections out to your bank. If the balance runs dry,
+  withdrawals are refused (and refunded) until it's topped up.
+
+### Fees
+
+Transfers between users and withdrawals both charge a fee **on top** of the
+amount: the recipient always gets the full amount. Schedules live in
+[src/services/fees.js](src/services/fees.js) and default to Paystack's NGN
+transfer tiers (₦10 up to ₦5,000, ₦25 up to ₦50,000, ₦50 above), so a
+withdrawal covers what Paystack charges for it. Fees go to a single platform
+wallet (`kind = 'fees'`, created by the migration) and show in the user's
+ledger as their own lines (`memo = 'fee'`). A refunded withdrawal refunds its
+fee too (`memo = 'fee refund'`).
 
 ---
 

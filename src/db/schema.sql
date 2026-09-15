@@ -44,15 +44,24 @@ ALTER TABLE wallets ALTER COLUMN user_id DROP NOT NULL;
 ALTER TABLE wallets DROP CONSTRAINT IF EXISTS wallets_user_id_key;
 ALTER TABLE wallets DROP CONSTRAINT IF EXISTS wallets_kind_check;
 ALTER TABLE wallets ADD CONSTRAINT wallets_kind_check CHECK (
-  (kind = 'user'   AND user_id IS NOT NULL) OR
-  (kind = 'escrow' AND user_id IS NULL)
+  (kind = 'user' AND user_id IS NOT NULL) OR
+  (kind IN ('escrow', 'fees') AND user_id IS NULL)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_personal_wallet_per_user
   ON wallets(user_id) WHERE kind = 'user';
 
+-- One platform wallet collects transfer and withdrawal fees.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_fees_wallet ON wallets(kind) WHERE kind = 'fees';
+INSERT INTO wallets (user_id, owner_name, currency, kind)
+SELECT NULL, 'Platform fees', 'NGN', 'fees'
+WHERE NOT EXISTS (SELECT 1 FROM wallets WHERE kind = 'fees');
+
+-- 'fee' / 'fee refund' marks fee lines so the app can label them.
+ALTER TABLE ledger_entries ADD COLUMN IF NOT EXISTS memo TEXT;
+
 ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_type_check;
 ALTER TABLE transactions ADD CONSTRAINT transactions_type_check CHECK (
-  type IN ('fund', 'transfer', 'contribution', 'payout')
+  type IN ('fund', 'transfer', 'contribution', 'payout', 'withdrawal')
 );
 
 CREATE TABLE IF NOT EXISTS contributions (

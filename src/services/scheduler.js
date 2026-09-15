@@ -1,8 +1,9 @@
 const { runDueContributions } = require('./ajo');
 const { reconcilePendingFunding } = require('./funding');
+const { reconcilePendingWithdrawals } = require('./withdrawals');
 
 const TICK_MS = Number(process.env.AJO_TICK_MS || 60_000);
-const FUNDING_TICK_MS = 60_000;
+const PAYSTACK_TICK_MS = 60_000;
 
 // Runs fn now and then every `ms`, skipping a tick while the last run is
 // still going. Each job has its own guard, so a slow Paystack can't stall
@@ -41,7 +42,8 @@ async function ajoSweep() {
 
 function startSchedulers() {
   every(TICK_MS, 'ajo', ajoSweep);
-  every(FUNDING_TICK_MS, 'funding', reconcilePendingFunding);
+  every(PAYSTACK_TICK_MS, 'funding', reconcilePendingFunding);
+  every(PAYSTACK_TICK_MS, 'withdrawal', reconcilePendingWithdrawals);
 }
 
 module.exports = { startSchedulers };

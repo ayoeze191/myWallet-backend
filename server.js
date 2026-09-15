@@ -2,9 +2,11 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { APP_BASE_URL, FRONTEND_BASE_URL } = require("./src/config");
+const { migrate } = require("./src/db/migrate");
 const authRoutes = require("./src/routes/auth");
 const walletRoutes = require("./src/routes/wallets");
 const transferRoutes = require("./src/routes/transfers");
+const withdrawalRoutes = require("./src/routes/withdrawals");
 const webhookRoutes = require("./src/routes/webhooks");
 const fundCallbackRoutes = require("./src/routes/fundCallback");
 const {
@@ -42,6 +44,7 @@ app.use(authRoutes);
 app.use(publicContributionRoutes);
 app.use(walletRoutes);
 app.use(transferRoutes);
+app.use(withdrawalRoutes);
 app.use(contributionRoutes);
 
 app.use((err, req, res, next) => {
@@ -50,9 +53,17 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`Ajo wallet system running on port ${PORT}`);
-  console.log(`Invite links:     ${FRONTEND_BASE_URL}/join/<code>`);
-  console.log(`Paystack returns: ${APP_BASE_URL}/wallets/fund/callback`);
-  startSchedulers();
-});
+migrate()
+  .then(() => {
+    console.log("Database schema is up to date.");
+    app.listen(PORT, () => {
+      console.log(`Ajo wallet system running on port ${PORT}`);
+      console.log(`Invite links:     ${FRONTEND_BASE_URL}/join/<code>`);
+      console.log(`Paystack returns: ${APP_BASE_URL}/wallets/fund/callback`);
+      startSchedulers();
+    });
+  })
+  .catch((err) => {
+    console.error("Database migration failed — refusing to start:", err);
+    process.exit(1);
+  });
