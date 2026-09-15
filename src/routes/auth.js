@@ -1,12 +1,13 @@
 const express = require('express');
 const { pool, withTransaction } = require('../db/pool');
 const { hashPassword, comparePassword, signToken } = require('../services/auth');
+const { asyncRoute } = require('../middleware/asyncRoute');
 
 const router = express.Router();
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-router.post('/auth/register', async (req, res) => {
+router.post('/auth/register', asyncRoute(async (req, res) => {
   const { name, email, password, currency = 'NGN' } = req.body;
 
   if (!name || !email || !password) {
@@ -26,8 +27,6 @@ router.post('/auth/register', async (req, res) => {
 
   const passwordHash = await hashPassword(password);
 
-  // Create the user AND their wallet together — a user should never exist
-  // without a wallet, so this has to be one atomic operation.
   const { user, wallet } = await withTransaction(async (client) => {
     const userResult = await client.query(
       'INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id, name, email, created_at',
@@ -44,9 +43,9 @@ router.post('/auth/register', async (req, res) => {
 
   const token = signToken({ userId: user.id });
   res.status(201).json({ token, user, wallet });
-});
+}));
 
-router.post('/auth/login', async (req, res) => {
+router.post('/auth/login', asyncRoute(async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'email and password are required' });
@@ -55,8 +54,6 @@ router.post('/auth/login', async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [email.toLowerCase()]);
   const user = rows[0];
 
-  // Same error for "no such user" and "wrong password" — don't reveal
-  // which one it was, so an attacker can't enumerate valid emails.
   if (!user || !(await comparePassword(password, user.password_hash))) {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
@@ -66,6 +63,6 @@ router.post('/auth/login', async (req, res) => {
     token,
     user: { id: user.id, name: user.name, email: user.email },
   });
-});
+}));
 
 module.exports = router;

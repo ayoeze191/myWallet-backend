@@ -82,19 +82,33 @@ each `ADD CONSTRAINT`), so existing users, balances and ledger history survive.
 | `JWT_SECRET` | **yes** | Signs auth tokens; the process exits if unset |
 | `PAYSTACK_SECRET_KEY` | **yes** | Used both to call Paystack and to verify its webhook signatures |
 | `PAYSTACK_BASE_URL` | no | Defaults to `https://api.paystack.co` |
-| `APP_BASE_URL` | no | Origin used to build the Paystack `callback_url` and invite links |
+| `NODE_ENV` | prod | Set to `production` on the host (Render is detected automatically). Makes the two base URLs below mandatory |
+| `APP_BASE_URL` | prod | **This backend's** origin, used to build the Paystack `callback_url`. Defaults to `http://localhost:4000` |
+| `FRONTEND_BASE_URL` | prod | **The frontend's** origin, used for invite links and the "Return to wallet" button after payment. Defaults to `http://localhost:5173` |
+| `CORS_ORIGINS` | no | Extra allowed origins, comma-separated, on top of the built-in list |
 | `AJO_TICK_MS` | no | Sweep interval, default `60000` |
 
-Two caveats worth knowing before you deploy:
+The two base URLs point at *different* services and are easy to mix up. The
+Paystack callback is a backend route (`/wallets/fund/callback`), while invite
+links point at a frontend route (`/join/:code`) owned by React Router. Setting
+`FRONTEND_BASE_URL` to the backend produces invite links nobody can open.
 
-- **`APP_BASE_URL` is doing two jobs.** The Paystack callback is a *backend*
-  route (`/wallets/fund/callback`), while invite links point at a *frontend*
-  route (`/join/:code`). With one variable you can only get one of them right;
-  splitting it into `APP_BASE_URL` and a separate `FRONTEND_BASE_URL` is the
-  fix and is not done yet.
-- **CORS origin is hardcoded** to `http://localhost:5173` in
-  [server.js](server.js). Change it (or make it an env var) before hosting the
-  frontend anywhere else.
+In a deployed setup they look like this:
+
+```
+NODE_ENV=production
+APP_BASE_URL=https://your-backend.onrender.com
+FRONTEND_BASE_URL=https://your-site.netlify.app
+```
+
+With `NODE_ENV=production`, the server refuses to start if either URL is unset
+or points at localhost, so a forgotten variable can't ship `localhost` invite
+links. A missing `https://` or a trailing slash is fixed up automatically. On
+boot it logs both resolved URLs; check them in your host's logs.
+
+Allowed CORS origins live in [server.js](server.js) — `http://localhost:5173`
+and the deployed frontend are built in, and `CORS_ORIGINS` adds more without a
+code change.
 
 ---
 

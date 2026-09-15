@@ -3,10 +3,6 @@ const { pool, withTransaction } = require('../db/pool');
 const { creditWallet, debitWallet, WalletError } = require('./ledger');
 const { reserveTransaction, markTransactionStatus } = require('./idempotency');
 
-/**
- * How far apart two consecutive rounds sit. Kept as Postgres intervals so
- * month arithmetic clamps correctly — Jan 31 + 1 month is Feb 28, not Mar 3.
- */
 const FREQUENCY_INTERVAL = {
   daily: '1 day',
   weekly: '7 days',
@@ -22,23 +18,9 @@ class AjoError extends Error {
 }
 
 function newInviteCode() {
-  // ~13 URL-safe chars. Long enough that codes can't be guessed, short
-  // enough to paste into WhatsApp without wrapping.
   return crypto.randomBytes(10).toString('base64url');
 }
 
-// ---------------------------------------------------------------------------
-// Creating and joining
-// ---------------------------------------------------------------------------
-
-/**
- * Start a new Ajo. The creator becomes member #1 and holds payout slot 1
- * by default — they can reshuffle everyone's slots later, before it starts.
- *
- * The group gets its OWN wallet (kind='escrow') to hold the pot. It is a
- * normal wallet row, so every naira that passes through a contribution shows
- * up in the same append-only ledger as everything else.
- */
 async function createContribution({
   creatorId,
   name,
@@ -104,12 +86,6 @@ async function createContribution({
   });
 }
 
-/**
- * Join an Ajo using the code from a shared invite link.
- *
- * The row is locked FOR UPDATE first so two people clicking the link at the
- * same moment can't both take the last seat.
- */
 async function joinByInviteCode({ inviteCode, userId }) {
   const wallet = await getPersonalWallet(userId);
 
@@ -147,8 +123,6 @@ async function joinByInviteCode({ inviteCode, userId }) {
       throw new AjoError('CONTRIBUTION_FULL', 'This contribution is already full');
     }
 
-    // No payout_slot yet — the creator arranges the order before it starts,
-    // and anyone still unassigned falls back to join order at launch.
     await client.query(
       `INSERT INTO contribution_members (contribution_id, user_id, wallet_id)
        VALUES ($1, $2, $3)`,
@@ -168,14 +142,6 @@ async function getPersonalWallet(userId) {
   return rows[0];
 }
 
-/**
- * The creator decides who collects the pot first, second, third...
- * Only while the group is still open — once it starts, the schedule is fixed.
- *
- * `slots` is [{ memberId, slot }]. Slots are wiped before being rewritten so
- * that swapping two members never trips the (contribution_id, payout_slot)
- * unique constraint mid-update.
- */
 async function assignPayoutSlots({ contributionId, creatorId, slots }) {
   return withTransaction(async (client) => {
     const contribution = await loadForUpdate(client, contributionId);
@@ -269,17 +235,6 @@ async function leaveContribution({ contributionId, userId }) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// The rotation engine
-// ---------------------------------------------------------------------------
-
-/**
- * Freeze the membership and lay out the full payout schedule.
- *
- * Slots are renumbered to a clean 1..N here. The creator may have assigned
- * slot 6 back when they expected six members but only four turned up — the
- * ordering they chose is preserved, the gaps are just squeezed out.
- */
 async function activate(client, contribution) {
   const { rows: members } = await client.query(
     `SELECT id FROM contribution_members
@@ -289,8 +244,6 @@ async function activate(client, contribution) {
   );
 
   if (members.length < 2) {
-    // Nobody to rotate with. Stay open and try again next tick — the creator
-    // can keep sharing the link, or cancel.
     return null;
   }
 
@@ -319,7 +272,6 @@ async function activate(client, contribution) {
     [contribution.id, contribution.start_date, interval, potPerRound]
   );
 
-  // Every member owes into every round, the recipient included.
   await client.query(
     `INSERT INTO round_contributions (round_id, member_id, amount)
      SELECT r.id, m.id, $2
@@ -339,15 +291,6 @@ async function activate(client, contribution) {
   return rows[0];
 }
 
-/**
- * Pull every outstanding contribution for one round out of members' wallets
- * and into the pot. Returns true only once the round is fully collected AND
- * paid out.
- *
- * A member with an empty wallet is NOT an error — their row stays pending and
- * gets retried on the next tick. The pot only pays out when it is whole, so
- * one person being short delays the round rather than shorting the recipient.
- */
 async function collectRound(client, contribution, round) {
   const { rows: outstanding } = await client.query(
     `SELECT rc.id, rc.amount, rc.attempts, rc.member_id, m.wallet_id, m.user_id
@@ -359,8 +302,6 @@ async function collectRound(client, contribution, round) {
   );
 
   for (const due of outstanding) {
-    // Deterministic key: retrying this member's payment for this round can
-    // never produce a second debit, however many ticks run.
     const { transaction } = await reserveTransaction({
       client,
       idempotencyKey: `ajo:contribution:${due.id}`,
@@ -397,9 +338,6 @@ async function collectRound(client, contribution, round) {
     } catch (err) {
       if (!(err instanceof WalletError)) throw err;
 
-      // debitWallet checks the balance in JS and bails before issuing any
-      // failing SQL, so the surrounding transaction is still healthy and the
-      // members who DID pay stay paid.
       if (due.attempts === 0) {
         await client.query(
           'UPDATE contribution_members SET missed_rounds = missed_rounds + 1 WHERE id = $1',
@@ -431,7 +369,6 @@ async function collectRound(client, contribution, round) {
   return true;
 }
 
-/** Hand the whole pot to whoever holds this round's slot. */
 async function payOutRound(client, contribution, round) {
   const { rows: recipients } = await client.query(
     'SELECT wallet_id, user_id FROM contribution_members WHERE id = $1',
@@ -473,13 +410,6 @@ async function payOutRound(client, contribution, round) {
   );
 }
 
-/**
- * Advance one contribution as far as it can go right now: start it if the
- * date has arrived, then collect and pay out every round that is due.
- *
- * SKIP LOCKED means a second tick that overlaps the first just moves on
- * instead of queueing up behind it and doing the work twice.
- */
 async function processContribution(contributionId) {
   return withTransaction(async (client) => {
     const { rows } = await client.query(
@@ -512,8 +442,6 @@ async function processContribution(contributionId) {
 
     const roundsPaid = [];
     for (const round of dueRounds) {
-      // Rounds are strictly sequential. If this one can't close, later rounds
-      // wait — nobody collects out of turn because someone else was broke.
       const completed = await collectRound(client, contribution, round);
       if (!completed) break;
       roundsPaid.push(round.round_number);
@@ -534,7 +462,6 @@ async function processContribution(contributionId) {
   });
 }
 
-/** One engine pass over every contribution that could possibly need work. */
 async function runDueContributions() {
   const { rows } = await pool.query(
     `SELECT id FROM contributions
@@ -554,10 +481,6 @@ async function runDueContributions() {
   }
   return results;
 }
-
-// ---------------------------------------------------------------------------
-// Reads
-// ---------------------------------------------------------------------------
 
 function listMembers(db, contributionId) {
   return db
@@ -592,7 +515,6 @@ async function listMyContributions(userId) {
   return rows;
 }
 
-/** Full view of one contribution. Members only — the invite preview is separate. */
 async function getContributionDetail({ contributionId, userId }) {
   const { rows } = await pool.query(
     `SELECT c.*, w.balance AS pot_balance,
@@ -629,11 +551,6 @@ async function getContributionDetail({ contributionId, userId }) {
   return { contribution, members, rounds, me };
 }
 
-/**
- * What someone sees when they open an invite link, before signing in.
- * Deliberately thin: enough to decide whether to join, no member emails,
- * no pot balance.
- */
 async function getInvitePreview(inviteCode) {
   const { rows } = await pool.query(
     `SELECT c.id, c.name, c.description, c.currency, c.contribution_amount,
@@ -648,8 +565,6 @@ async function getInvitePreview(inviteCode) {
   if (!rows[0]) throw new AjoError('INVITE_NOT_FOUND', 'That invite link is not valid', 404);
 
   const preview = rows[0];
-  // What the pot is worth once the group fills up — that is the number
-  // someone is deciding against, not today's partial count.
   preview.pot_when_full =
     Number(preview.contribution_amount) * Number(preview.member_limit);
   return preview;

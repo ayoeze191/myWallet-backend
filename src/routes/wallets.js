@@ -3,10 +3,10 @@ const { pool } = require('../db/pool');
 const { reserveTransaction } = require('../services/idempotency');
 const { initializeTransaction } = require('../services/paystack');
 const { requireAuth } = require('../middleware/requireAuth');
+const { asyncRoute } = require('../middleware/asyncRoute');
 
 const router = express.Router();
 
-// Every route below requires a valid logged-in user.
 router.use(requireAuth);
 
 async function getWalletForUser(userId) {
@@ -14,15 +14,13 @@ async function getWalletForUser(userId) {
   return rows[0] || null;
 }
 
-// Get my own wallet + balance
-router.get('/wallets/me', async (req, res) => {
+router.get('/wallets/me', asyncRoute(async (req, res) => {
   const wallet = await getWalletForUser(req.userId);
   if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
   res.json(wallet);
-});
+}));
 
-// My own ledger history
-router.get('/wallets/me/ledger', async (req, res) => {
+router.get('/wallets/me/ledger', asyncRoute(async (req, res) => {
   const wallet = await getWalletForUser(req.userId);
   if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
 
@@ -31,14 +29,9 @@ router.get('/wallets/me/ledger', async (req, res) => {
     [wallet.id]
   );
   res.json(rows);
-});
+}));
 
-/**
- * Look up a potential transfer recipient by email. Deliberately returns
- * only their name — never their balance or wallet id — so this can't be
- * used to snoop on other users' account details before sending them money.
- */
-router.get('/users/lookup', async (req, res) => {
+router.get('/users/lookup', asyncRoute(async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).json({ error: 'email query param is required' });
 
@@ -50,13 +43,9 @@ router.get('/users/lookup', async (req, res) => {
   );
   if (rows.length === 0) return res.status(404).json({ error: 'No user found with that email' });
   res.json({ name: rows[0].name });
-});
+}));
 
-/**
- * Start funding MY wallet via Paystack. Requires an Idempotency-Key header
- * so a retried "Fund" click never starts two separate charges.
- */
-router.post('/wallets/me/fund', async (req, res) => {
+router.post('/wallets/me/fund', asyncRoute(async (req, res) => {
   const { amount, email } = req.body;
   const idempotencyKey = req.headers['idempotency-key'];
 
@@ -89,6 +78,6 @@ router.post('/wallets/me/fund', async (req, res) => {
     authorization_url: paystackData.authorization_url,
     reference,
   });
-});
+}));
 
 module.exports = router;

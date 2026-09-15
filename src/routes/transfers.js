@@ -3,18 +3,13 @@ const { pool } = require('../db/pool');
 const { transferBetweenWallets, WalletError } = require('../services/ledger');
 const { reserveTransaction, markTransactionStatus } = require('../services/idempotency');
 const { requireAuth } = require('../middleware/requireAuth');
+const { asyncRoute } = require('../middleware/asyncRoute');
 
 const router = express.Router();
 
 router.use(requireAuth);
 
-/**
- * Transfer money from MY wallet to another user's wallet, identified by
- * their email. fromWalletId is derived from the authenticated user —
- * never taken from the request body — so nobody can move money out of
- * a wallet that isn't theirs, no matter what the client sends.
- */
-router.post('/transfers', async (req, res) => {
+router.post('/transfers', asyncRoute(async (req, res) => {
   const { toEmail, amount } = req.body;
   const idempotencyKey = req.headers['idempotency-key'];
 
@@ -64,6 +59,6 @@ router.post('/transfers', async (req, res) => {
     }
     throw err;
   }
-});
+}));
 
 module.exports = router;

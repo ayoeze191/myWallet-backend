@@ -1,5 +1,6 @@
 const express = require("express");
 const { pool } = require("../db/pool");
+const { FRONTEND_BASE_URL } = require("../config");
 
 const router = express.Router();
 
@@ -12,11 +13,6 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
-/**
- * Paystack sends users back here after its hosted payment page. This is a
- * receipt/status page only: a redirect is not evidence that funds arrived.
- * The signed Paystack webhook remains the only path that credits a wallet.
- */
 router.get("/wallets/fund/callback", async (req, res, next) => {
   try {
     const malformedQuery =
@@ -89,7 +85,7 @@ router.get("/wallets/fund/callback", async (req, res, next) => {
       p { margin: 13px 0 24px; color: #57615a; line-height: 1.55; }
       .reference { padding: 12px; overflow-wrap: anywhere; background: #f3f6f3; border-radius: 8px; color: #3d4b40; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
       small { display: block; margin-bottom: 6px; color: #78827a; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
-      button { margin-top: 25px; padding: 12px 18px; border: 0; border-radius: 9px; background: #176b39; color: #fff; font: inherit; font-weight: 650; cursor: pointer; }
+      .button { display: inline-block; margin-top: 25px; padding: 12px 18px; border-radius: 9px; background: #176b39; color: #fff; font-weight: 650; text-decoration: none; }
     </style>
   </head>
   <body>
@@ -100,7 +96,7 @@ router.get("/wallets/fund/callback", async (req, res, next) => {
       <small>Transaction reference</small>
       <div class="reference">${safeReference}</div>
       ${status === "pending" ? "<p><small>This page refreshes automatically while confirmation arrives.</small></p>" : ""}
-      <button type="button" onclick="history.length > 1 ? history.back() : location.assign('/')">Return to wallet</button>
+      <a class="button" href="${escapeHtml(FRONTEND_BASE_URL)}">Return to wallet</a>
     </main>
   </body>
 </html>`);

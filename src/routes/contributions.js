@@ -3,18 +3,12 @@ const { requireAuth } = require('../middleware/requireAuth');
 const { WalletError } = require('../services/ledger');
 const ajo = require('../services/ajo');
 const { AjoError } = require('../services/ajo');
-
-const APP_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:5173';
+const { FRONTEND_BASE_URL } = require('../config');
 
 function inviteLink(code) {
-  return `${APP_BASE_URL}/join/${code}`;
+  return `${FRONTEND_BASE_URL}/join/${code}`;
 }
 
-/**
- * Express 4 does not catch rejected promises from async handlers, so every
- * handler goes through here — a thrown AjoError becomes a clean JSON error
- * instead of a silent unhandled rejection.
- */
 function route(handler) {
   return (req, res, next) => {
     Promise.resolve(handler(req, res)).catch((err) => {
@@ -29,10 +23,6 @@ function route(handler) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Public — this is what an invite link opens. No token required, because the
-// person clicking it may not have an account yet.
-// ---------------------------------------------------------------------------
 const publicContributionRoutes = express.Router();
 
 publicContributionRoutes.get(
@@ -43,13 +33,9 @@ publicContributionRoutes.get(
   })
 );
 
-// ---------------------------------------------------------------------------
-// Authenticated
-// ---------------------------------------------------------------------------
 const contributionRoutes = express.Router();
 contributionRoutes.use(requireAuth);
 
-/** Start an Ajo. Responds with the link to share. */
 contributionRoutes.post(
   '/contributions',
   route(async (req, res) => {
@@ -79,7 +65,6 @@ contributionRoutes.post(
   })
 );
 
-/** Every Ajo I created or joined. */
 contributionRoutes.get(
   '/contributions',
   route(async (req, res) => {
@@ -90,7 +75,6 @@ contributionRoutes.get(
   })
 );
 
-/** Accept an invite. */
 contributionRoutes.post(
   '/invites/:code/join',
   route(async (req, res) => {
@@ -119,7 +103,6 @@ contributionRoutes.get(
   })
 );
 
-/** Creator rearranges who collects the pot in which round. */
 contributionRoutes.put(
   '/contributions/:id/payout-order',
   route(async (req, res) => {
@@ -155,15 +138,9 @@ contributionRoutes.post(
   })
 );
 
-/**
- * Nudge the engine for one group instead of waiting for the next scheduled
- * sweep. Members only — it just runs the same code the scheduler runs, so
- * the worst a member can do is make their own group catch up sooner.
- */
 contributionRoutes.post(
   '/contributions/:id/run',
   route(async (req, res) => {
-    // Throws NOT_A_MEMBER for outsiders.
     await ajo.getContributionDetail({ contributionId: req.params.id, userId: req.userId });
     const result = await ajo.processContribution(req.params.id);
     res.json(result);

@@ -1,9 +1,5 @@
 const { withTransaction } = require('../db/pool');
 
-/**
- * Credit a wallet (money coming in — e.g. a Paystack funding).
- * Locks the wallet row so no concurrent operation can read a stale balance.
- */
 async function creditWallet({ client, walletId, amount, transactionId }) {
   const { rows } = await client.query(
     'SELECT balance FROM wallets WHERE id = $1 FOR UPDATE',
@@ -27,11 +23,6 @@ async function creditWallet({ client, walletId, amount, transactionId }) {
   return newBalance;
 }
 
-/**
- * Debit a wallet (money going out — e.g. sending to another wallet).
- * Throws INSUFFICIENT_FUNDS rather than allowing balance to go negative —
- * the DB CHECK constraint (balance >= 0) is a second line of defense.
- */
 async function debitWallet({ client, walletId, amount, transactionId }) {
   const { rows } = await client.query(
     'SELECT balance FROM wallets WHERE id = $1 FOR UPDATE',
@@ -60,13 +51,6 @@ async function debitWallet({ client, walletId, amount, transactionId }) {
   return newBalance;
 }
 
-/**
- * Move money from one wallet to another as ONE atomic operation.
- * Both the debit and the credit either both happen or neither does.
- *
- * Wallets are locked in a consistent order (sorted by id) to avoid
- * deadlocks when two transfers happen in opposite directions at once.
- */
 async function transferBetweenWallets({ fromWalletId, toWalletId, amount, transactionId }) {
   return withTransaction(async (client) => {
     const [firstId, secondId] = [fromWalletId, toWalletId].sort();

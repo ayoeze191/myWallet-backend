@@ -1,14 +1,5 @@
 const { pool } = require('../db/pool');
 
-/**
- * Reserve an idempotency key by inserting a transaction row up front.
- * If the key already exists (unique constraint), this is a retried
- * request — we return the existing transaction instead of processing again.
- *
- * Pass `client` to run inside a caller's transaction. The Ajo engine does
- * this so the transaction row and the ledger entries it produces commit or
- * roll back together.
- */
 async function reserveTransaction({ idempotencyKey, type, metadata = {}, client }) {
   const db = client || pool;
 
